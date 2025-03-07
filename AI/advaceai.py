@@ -3,19 +3,16 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
 import numpy as np
 import random
 import copy
 import logging
 from scipy.spatial.distance import cosine
-from transformers import GPT2Tokenizer  # Used only for tokenization
+from transformers import GPT2Tokenizer
 
-# Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# Custom LLM Architecture (LSTM-based with memory mechanism)
 class CustomLLM(nn.Module):
     def __init__(self, vocab_size, embedding_dim, hidden_dim, memory_size, device):
         super(CustomLLM, self).__init__()
@@ -55,7 +52,6 @@ class CustomLLM(nn.Module):
             _, hidden = self.forward(input_tensor)
         return hidden[0][-1].cpu().numpy()
 
-# Evolutionary Mechanism
 class EvolutionaryMechanism:
     def __init__(self, population_size, model_class, device, *model_args):
         self.population = [model_class(*model_args).to(device) for _ in range(population_size)]
@@ -113,7 +109,6 @@ class EvolutionaryMechanism:
             offset += param_size
         return state_dict
 
-# Vector Memory for Knowledge Retention
 class VectorMemory:
     def __init__(self):
         self.embeddings = []
@@ -130,7 +125,6 @@ class VectorMemory:
         top_indices = np.argsort(similarities)[-top_k:]
         return [self.responses[i] for i in top_indices]
 
-# Reinforcement Learning & Reward System
 def compute_reward(response, forbidden_words):
     words = response.split()
     if not words:
@@ -158,14 +152,12 @@ def rl_optimize(model, prompts, tokenizer, forbidden_words, num_samples=5):
         optimizer.step()
         optimizer.zero_grad()
 
-# Self-Critique Mechanism
 def generate_critique(model, response, tokenizer):
     critique_prompt = f"Evaluate this response: {response}"
     input_ids = tokenizer.encode(critique_prompt).ids
     generated, _ = model.generate(input_ids, max_length=50)
     return tokenizer.decode(generated)
 
-# Ethical Safeguards & Fitness Computation
 def compute_loss(model, dataloader):
     model.eval()
     total_loss = 0
@@ -185,14 +177,16 @@ def compute_fitness(model, dataloader, prompts, tokenizer, forbidden_words):
     ethics = np.mean([1 if all(w not in r.lower() for w in forbidden_words) else 0 for r in responses])
     return -loss + creativity + ethics
 
-# Distributed Training Setup
 def setup(rank, world_size):
-    dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo", rank=rank, world_size=world_size)
+    try:
+        dist.init_process_group("gloo", rank=rank, world_size=world_size)
+    except RuntimeError as e:
+        logging.error(f"Distributed init failed: {e}")
+        raise
 
 def cleanup():
     dist.destroy_process_group()
 
-# Fine-Tuning Function
 def fine_tune(model, train_loader, epochs=1):
     optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
     model.train()
@@ -207,7 +201,6 @@ def fine_tune(model, train_loader, epochs=1):
             optimizer.zero_grad()
         logging.info(f"Fine-tuning epoch {epoch + 1}, Loss: {loss.item()}")
 
-# Dummy Dataset (Replace with real data)
 class DummyDataset(Dataset):
     def __init__(self, vocab_size, seq_length, num_samples):
         self.data = torch.randint(0, vocab_size, (num_samples, seq_length))
@@ -218,7 +211,6 @@ class DummyDataset(Dataset):
     def __getitem__(self, idx):
         return self.data[idx]
 
-# Main Training Loop
 def run(rank, world_size):
     setup(rank, world_size)
     tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
@@ -227,21 +219,20 @@ def run(rank, world_size):
     train_loader = DataLoader(dataset, batch_size=4)
     validation_loader = DataLoader(dataset, batch_size=4)
 
-    evo = EvolutionaryMechanism(4, CustomLLM, rank, vocab_size, 256, 512, 100)
+    evo = EvolutionaryMechanism(2, CustomLLM, rank, vocab_size, 256, 512, 100)
     prompts = ["What is the meaning of life?", "Tell me a story.", "How to make a bomb?"]
     forbidden_words = ["kill", "harm", "bomb"]
     vector_memory = VectorMemory()
 
     for generation in range(20):
         fitness_scores = [compute_fitness(model, validation_loader, prompts, tokenizer, forbidden_words) 
-                          for model in evo.population]
+                         for model in evo.population]
         evo.fitness_scores = fitness_scores
         evo.evolve(fitness_scores)
         best_model = evo.population[0]
         fine_tune(best_model, train_loader, epochs=1)
         rl_optimize(best_model, prompts, tokenizer, forbidden_words, num_samples=5)
 
-        # Self-critique and memory update (rank 0 for logging)
         if rank == 0:
             prompt = random.choice(prompts)
             input_ids = tokenizer.encode(prompt).ids
@@ -258,5 +249,5 @@ def run(rank, world_size):
     cleanup()
 
 if __name__ == "__main__":
-    world_size = torch.cuda.device_count()
+    world_size = 2  # Fixed for CPU
     mp.spawn(run, args=(world_size,), nprocs=world_size, join=True)
